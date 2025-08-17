@@ -1,0 +1,586 @@
+<!DOCTYPE html>
+<html lang="zh-CN">
+<head>
+    <meta charset="UTF-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1.0">
+    <title>视频帧颜色分割处理工具</title>
+    <script src="jszip.min.js"></script>
+    <script src="FileSaver.min.js"></script>
+</head>
+<body>
+    <div id="app">
+        <h1>视频帧颜色分割处理工具</h1>
+        
+        <!-- 上传区域 -->
+        <div id="upload-container">
+            <input type="file" id="fileInput" accept="video/*,image/*">
+            <div id="upload-area">选择文件</div>
+        </div>
+        
+        <!-- 配置区域 -->
+        <div id="config-container">
+            <div>
+                <label>帧率 (FPS):</label>
+                <input type="number" id="frameRate" value="5" min="1" max="30">
+            </div>
+            <div>
+                <label>颜色模式:</label>
+                <select id="colorMode">
+                    <option value="auto">自动</option>
+                    <option value="manual">手动</option>
+                </select>
+            </div>
+            <div id="autoColorContainer">
+                <label>颜色数量:</label>
+                <input type="number" id="colorCount" value="32" min="1" max="64">
+            </div>
+            <div id="manualColorContainer" style="display:none">
+                <label>颜色列表 (每行一个):</label>
+                <textarea id="manualColors" rows="3" placeholder="000000&#10;FFFFFF"></textarea>
+            </div>
+            <div>
+                <label>最大宽度 (像素):</label>
+                <input type="number" id="maxWidth" value="400" min="100" max="1000">
+            </div>
+        </div>
+        
+        <!-- 视频预览 -->
+        <div id="preview-container">
+            <video id="videoPreview"></video>
+        </div>
+        
+        <!-- 控制按钮 -->
+        <div id="controls">
+            <button id="processBtn">开始处理</button>
+            <button id="downloadBtn" style="display:none">下载结果(ZIP)</button>
+        </div>
+        
+        <!-- 状态信息 -->
+        <div id="status">请上传视频或图片文件</div>
+        
+        <!-- 颜色展示区域 -->
+        <div id="color-display"></div>
+    </div>
+
+    <script>
+        // 变量声明
+        let video = null;
+        let videoDuration = 0;
+        let totalFrames = 0;
+        let processedFrames = 0;
+        let zip = new JSZip();
+        let isImage = false;
+        let imageFile = null;
+        
+        // 获取DOM元素
+        const fileInput = document.getElementById('fileInput');
+        const uploadArea = document.getElementById('upload-area');
+        const videoPreview = document.getElementById('videoPreview');
+        const processBtn = document.getElementById('processBtn');
+        const downloadBtn = document.getElementById('downloadBtn');
+        const statusText = document.getElementById('status');
+        const colorDisplay = document.getElementById('color-display');
+        const colorMode = document.getElementById('colorMode');
+        const manualColors = document.getElementById('manualColors');
+        const autoColorContainer = document.getElementById('autoColorContainer');
+        const manualColorContainer = document.getElementById('manualColorContainer');
+        
+        // 颜色模式切换
+        colorMode.addEventListener('change', () => {
+            if (colorMode.value === 'auto') {
+                autoColorContainer.style.display = 'block';
+                manualColorContainer.style.display = 'none';
+            } else {
+                autoColorContainer.style.display = 'none';
+                manualColorContainer.style.display = 'block';
+            }
+        });
+        
+        // 上传区域点击事件
+        uploadArea.addEventListener('click', () => {
+            fileInput.click();
+        });
+        
+        // 文件选择事件
+        fileInput.addEventListener('change', (e) => {
+            if (e.target.files.length) {
+                handleFileSelect(e.target.files[0]);
+            }
+        });
+        
+        // 处理按钮点击事件
+        processBtn.addEventListener('click', () => {
+            startProcessing();
+        });
+        
+        // 下载按钮点击事件
+        downloadBtn.addEventListener('click', () => {
+            downloadResult();
+        });
+        
+        // 处理文件选择
+        function handleFileSelect(file) {
+            const url = URL.createObjectURL(file);
+            imageFile = file;
+            processBtn.disabled = false;
+            statusText.textContent = "文件已加载";
+            
+            // 检测是否为图片
+            if (file.type.startsWith('image/')) {
+                isImage = true;
+                videoPreview.style.display = 'none';
+                document.getElementById('frameRate').disabled = true;
+                statusText.textContent = "图片文件已加载";
+            } else {
+                isImage = false;
+                videoPreview.style.display = 'block';
+                videoPreview.src = url;
+                document.getElementById('frameRate').disabled = false;
+                statusText.textContent = "视频文件已加载";
+            }
+        }
+        
+        // 开始处理
+        function startProcessing() {
+            // 获取配置参数
+            const frameRate = parseInt(document.getElementById('frameRate').value) || 5;
+            const colorCount = parseInt(document.getElementById('colorCount').value) || 32;
+            const maxWidth = parseInt(document.getElementById('maxWidth').value) || 400;
+            
+            // 验证参数
+            if (!fileInput.files.length) {
+                statusText.textContent = "请先上传文件";
+                return;
+            }
+            
+            // 清空颜色展示区域
+            colorDisplay.innerHTML = '';
+            
+            // 如果是图片，只处理一帧
+            if (isImage) {
+                totalFrames = 1;
+                processImageFrame(colorCount, maxWidth);
+            } else {
+                // 视频处理
+                totalFrames = Math.floor(videoDuration * frameRate);
+                processVideoFrames(frameRate, colorCount, maxWidth);
+            }
+        }
+        
+        // 处理图片帧
+        function processImageFrame(colorCount, maxWidth) {
+            // 初始化
+            processedFrames = 0;
+            zip = new JSZip();
+            statusText.textContent = "开始处理图片...";
+            
+            // 创建临时Canvas
+            const canvas = document.createElement('canvas');
+            const ctx = canvas.getContext('2d');
+            
+            // 加载图片
+            const img = new Image();
+            img.onload = function() {
+                // 计算缩放比例
+                const scale = Math.min(maxWidth / img.width, 1);
+                const width = Math.floor(img.width * scale);
+                const height = Math.floor(img.height * scale);
+                
+                canvas.width = width;
+                canvas.height = height;
+                
+                ctx.drawImage(img, 0, 0, width, height);
+                
+                // 获取图像数据
+                const imageData = ctx.getImageData(0, 0, width, height);
+                
+                // 获取颜色
+                let colors;
+                if (colorMode.value === 'auto') {
+                    // 自动模式：使用中位切分算法
+                    colors = medianCutQuantize(imageData, colorCount);
+                } else {
+                    // 手动模式：解析用户输入的颜色
+                    colors = parseManualColors();
+                    if (colors.length === 0) {
+                        statusText.textContent = "请输入有效的颜色值";
+                        return;
+                    }
+                }
+                
+                // 生成颜色分割图
+                generateColorMasks(colors, imageData, width, height, 0, true);
+                
+                // 更新进度
+                processedFrames++;
+                statusText.textContent = "图片处理完成!";
+                downloadBtn.style.display = 'block';
+            };
+            
+            img.src = URL.createObjectURL(imageFile);
+        }
+        
+        // 处理视频帧
+        function processVideoFrames(frameRate, colorCount, maxWidth) {
+            // 初始化
+            video = videoPreview;
+            video.currentTime = 0;
+            processedFrames = 0;
+            zip = new JSZip();
+            
+            // 隐藏下载按钮
+            downloadBtn.style.display = 'none';
+            
+            // 设置视频10倍速播放
+            video.playbackRate = 10.0;
+            
+            // 获取视频时长
+            videoDuration = video.duration;
+            totalFrames = Math.floor(videoDuration * frameRate);
+            
+            // 开始处理
+            processNextFrame(colorCount, maxWidth);
+        }
+        
+        // 处理下一帧
+        function processNextFrame(colorCount, maxWidth) {
+            if (processedFrames >= totalFrames) {
+                // 所有帧处理完成
+                statusText.textContent = "处理完成!";
+                downloadBtn.style.display = 'block';
+                video.playbackRate = 1.0; // 恢复正常速度
+                return;
+            }
+            
+            // 计算当前帧的时间位置
+            const currentTime = processedFrames / (totalFrames / videoDuration);
+            video.currentTime = currentTime;
+            
+            statusText.textContent = `处理中: ${processedFrames + 1}/${totalFrames} 帧`;
+        }
+        
+        // 视频帧处理事件
+        videoPreview.onseeked = function() {
+            // 获取配置参数
+            const colorCount = parseInt(document.getElementById('colorCount').value) || 32;
+            const maxWidth = parseInt(document.getElementById('maxWidth').value) || 400;
+            
+            // 创建临时Canvas
+            const canvas = document.createElement('canvas');
+            const ctx = canvas.getContext('2d');
+            
+            // 计算缩放比例
+            const scale = Math.min(maxWidth / video.videoWidth, 1);
+            const width = Math.floor(video.videoWidth * scale);
+            const height = Math.floor(video.videoHeight * scale);
+            
+            canvas.width = width;
+            canvas.height = height;
+            
+            ctx.drawImage(video, 0, 0, width, height);
+            
+            // 获取图像数据
+            const imageData = ctx.getImageData(0, 0, width, height);
+            
+            // 获取颜色
+            let colors;
+            if (colorMode.value === 'auto') {
+                // 自动模式：使用中位切分算法
+                colors = medianCutQuantize(imageData, colorCount);
+            } else {
+                // 手动模式：解析用户输入的颜色
+                colors = parseManualColors();
+                if (colors.length === 0) {
+                    statusText.textContent = "请输入有效的颜色值";
+                    return;
+                }
+            }
+            
+            // 生成颜色分割图
+            generateColorMasks(colors, imageData, width, height, processedFrames, false);
+            
+            // 更新进度
+            processedFrames++;
+            
+            // 处理下一帧（使用setTimeout(0)避免阻塞）
+            setTimeout(() => processNextFrame(colorCount, maxWidth), 0);
+        };
+        
+        // 解析手动输入的颜色
+        function parseManualColors() {
+            const input = manualColors.value.trim();
+            if (!input) return [];
+            
+            const lines = input.split('\n');
+            const colors = [];
+            
+            for (let line of lines) {
+                line = line.trim().toUpperCase();
+                if (!line) continue;
+                
+                // 移除可能的#前缀
+                if (line.startsWith('#')) {
+                    line = line.substring(1);
+                }
+                
+                // 验证长度
+                if (line.length === 3) {
+                    // 短格式颜色
+                    const r = parseInt(line[0] + line[0], 16);
+                    const g = parseInt(line[1] + line[1], 16);
+                    const b = parseInt(line[2] + line[2], 16);
+                    colors.push({r, g, b});
+                } else if (line.length === 6) {
+                    // 标准格式颜色
+                    const r = parseInt(line.substring(0, 2), 16);
+                    const g = parseInt(line.substring(2, 4), 16);
+                    const b = parseInt(line.substring(4, 6), 16);
+                    colors.push({r, g, b});
+                }
+            }
+            
+            return colors;
+        }
+        
+        // 中位切分颜色量化算法
+        function medianCutQuantize(imageData, colorCount) {
+            const data = imageData.data;
+            const pixels = [];
+            
+            // 收集所有像素
+            for (let i = 0; i < data.length; i += 4) {
+                pixels.push({
+                    r: data[i],
+                    g: data[i + 1],
+                    b: data[i + 2]
+                });
+            }
+            
+            // 初始盒子包含所有像素
+            const initialBox = {
+                pixels: pixels,
+                rMin: 0, rMax: 255,
+                gMin: 0, gMax: 255,
+                bMin: 0, bMax: 255
+            };
+            
+            // 计算盒子范围
+            calculateBoxRange(initialBox);
+            
+            const boxes = [initialBox];
+            
+            // 分割盒子直到达到目标颜色数
+            while (boxes.length < colorCount && boxes.length < pixels.length) {
+                // 找到范围最大的盒子
+                let boxToSplit = null;
+                let maxRange = -1;
+                
+                for (const box of boxes) {
+                    const rRange = box.rMax - box.rMin;
+                    const gRange = box.gMax - box.gMin;
+                    const bRange = box.bMax - box.bMin;
+                    
+                    const maxBoxRange = Math.max(rRange, gRange, bRange);
+                    if (maxBoxRange > maxRange) {
+                        maxRange = maxBoxRange;
+                        boxToSplit = box;
+                    }
+                }
+                
+                if (!boxToSplit) break;
+                
+                // 确定分割通道
+                const rRange = boxToSplit.rMax - boxToSplit.rMin;
+                const gRange = boxToSplit.gMax - boxToSplit.gMin;
+                const bRange = boxToSplit.bMax - boxToSplit.bMin;
+                
+                let channel;
+                if (rRange >= gRange && rRange >= bRange) channel = 'r';
+                else if (gRange >= rRange && gRange >= bRange) channel = 'g';
+                else channel = 'b';
+                
+                // 按选定通道排序像素
+                boxToSplit.pixels.sort((a, b) => a[channel] - b[channel]);
+                
+                // 找到中位数
+                const medianIndex = Math.floor(boxToSplit.pixels.length / 2);
+                
+                // 创建新盒子
+                const box1 = {
+                    pixels: boxToSplit.pixels.slice(0, medianIndex)
+                };
+                const box2 = {
+                    pixels: boxToSplit.pixels.slice(medianIndex)
+                };
+                
+                // 计算新盒子范围
+                calculateBoxRange(box1);
+                calculateBoxRange(box2);
+                
+                // 替换旧盒子
+                const index = boxes.indexOf(boxToSplit);
+                boxes.splice(index, 1, box1, box2);
+            }
+            
+            // 计算每个盒子的平均颜色
+            const colors = [];
+            for (const box of boxes) {
+                let rSum = 0, gSum = 0, bSum = 0;
+                
+                for (const pixel of box.pixels) {
+                    rSum += pixel.r;
+                    gSum += pixel.g;
+                    bSum += pixel.b;
+                }
+                
+                const count = box.pixels.length;
+                colors.push({
+                    r: Math.round(rSum / count),
+                    g: Math.round(gSum / count),
+                    b: Math.round(bSum / count)
+                });
+            }
+            
+            return colors;
+        }
+        
+        // 计算盒子颜色范围
+        function calculateBoxRange(box) {
+            if (box.pixels.length === 0) return;
+            
+            box.rMin = 255; box.rMax = 0;
+            box.gMin = 255; box.gMax = 0;
+            box.bMin = 255; box.bMax = 0;
+            
+            for (const pixel of box.pixels) {
+                if (pixel.r < box.rMin) box.rMin = pixel.r;
+                if (pixel.r > box.rMax) box.rMax = pixel.r;
+                if (pixel.g < box.gMin) box.gMin = pixel.g;
+                if (pixel.g > box.gMax) box.gMax = pixel.g;
+                if (pixel.b < box.bMin) box.bMin = pixel.b;
+                if (pixel.b > box.bMax) box.bMax = pixel.b;
+            }
+        }
+        
+        // 生成颜色分割图
+        function generateColorMasks(colors, originalImageData, width, height, frameIndex, isImage) {
+            const data = originalImageData.data;
+            const pixelCount = width * height;
+            
+            // 创建像素索引映射
+            const indexMap = new Uint8Array(pixelCount);
+            
+            // 为每个像素找到最近的颜色
+            for (let i = 0, pixelIndex = 0; i < data.length; i += 4, pixelIndex++) {
+                const r = data[i];
+                const g = data[i + 1];
+                const b = data[i + 2];
+                
+                let minDistance = Number.MAX_VALUE;
+                let closestColorIndex = 0;
+                
+                // 找到最近的颜色
+                for (let j = 0; j < colors.length; j++) {
+                    const color = colors[j];
+                    const dr = r - color.r;
+                    const dg = g - color.g;
+                    const db = b - color.b;
+                    const distance = dr * dr + dg * dg + db * db;
+                    
+                    if (distance < minDistance) {
+                        minDistance = distance;
+                        closestColorIndex = j;
+                    }
+                }
+                
+                indexMap[pixelIndex] = closestColorIndex;
+            }
+            
+            // 为每种颜色生成分割图
+            const frameTime = isImage ? 0 : video.currentTime;
+            const folderName = isImage ? "image_frame" : `${frameIndex}_${Math.floor(frameTime * 1000)}`;
+            const frameFolder = zip.folder(folderName);
+            
+            // 清空颜色展示区域（只保留当前帧）
+            colorDisplay.innerHTML = '';
+            
+            // 添加帧信息
+            const frameInfo = document.createElement('div');
+            frameInfo.textContent = `帧: ${frameIndex} (时间: ${frameTime.toFixed(2)}秒)`;
+            colorDisplay.appendChild(frameInfo);
+            
+            colors.forEach((color, colorIndex) => {
+                // 创建Canvas元素
+                const canvas = document.createElement('canvas');
+                canvas.width = width;
+                canvas.height = height;
+                
+                const ctx = canvas.getContext('2d');
+                const imageData = ctx.createImageData(width, height);
+                const newData = imageData.data;
+                
+                // 处理每个像素
+                for (let i = 0, pixelIndex = 0; i < newData.length; i += 4, pixelIndex++) {
+                    // 如果该像素属于当前颜色，设为黑色，否则白色
+                    if (indexMap[pixelIndex] === colorIndex) {
+                        newData[i] = 0;     // R
+                        newData[i + 1] = 0;  // G
+                        newData[i + 2] = 0;  // B
+                    } else {
+                        newData[i] = 255;    // R
+                        newData[i + 1] = 255; // G
+                        newData[i + 2] = 255; // B
+                    }
+                    newData[i + 3] = 255;    // Alpha
+                }
+                
+                // 将图像数据放回Canvas
+                ctx.putImageData(imageData, 0, 0);
+                
+                // 将图像添加到ZIP
+                const dataURL = canvas.toDataURL('image/png');
+                const base64Data = dataURL.split(',')[1];
+                const hexColor = rgbToHex(color.r, color.g, color.b).substring(1);
+                frameFolder.file(`${hexColor}.png`, base64Data, {base64: true});
+                
+                // 在页面上展示颜色信息
+                const colorDiv = document.createElement('div');
+                
+                // 颜色名称
+                const colorName = document.createElement('div');
+                colorName.textContent = `颜色: #${hexColor}`;
+                colorDiv.appendChild(colorName);
+                
+                // 黑白图像预览
+                const img = document.createElement('img');
+                img.src = dataURL;
+                img.width = 100;
+                colorDiv.appendChild(img);
+                
+                colorDisplay.appendChild(colorDiv);
+            });
+        }
+        
+        // 下载结果
+        function downloadResult() {
+            downloadBtn.disabled = true;
+            downloadBtn.textContent = "正在生成压缩包...";
+            
+            zip.generateAsync({type:"blob"})
+            .then(function(content) {
+                saveAs(content, isImage ? "image_frame.zip" : "video_frames.zip");
+                downloadBtn.disabled = false;
+                downloadBtn.textContent = "下载结果(ZIP)";
+            });
+        }
+        
+        // RGB转十六进制
+        function rgbToHex(r, g, b) {
+            return '#' + [r, g, b]
+                .map(c => c.toString(16).padStart(2, '0'))
+                .join('')
+                .toUpperCase();
+        }
+    </script>
+</body>
+</html>
